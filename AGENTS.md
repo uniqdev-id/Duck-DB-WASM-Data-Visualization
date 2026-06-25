@@ -21,6 +21,14 @@ A dashboard where chart components are stored in Supabase (not hardcoded), query
 
 4. **JSON paste-in is an alternate way to fill the same form, not a separate code path.** Whether a component's fields come from manual inputs or a pasted JSON blob, the same validation applies before saving — most importantly, `sql_template` must still contain `{{filter}}` exactly once. Never save parsed JSON straight to the database without running it through the same validation as the manual form.
 
+5. **Chat tools (createChart/updateChart) must call the same shared validator as the JSON paste-in form** — one function, no DOM dependency, imported by both the client form and the server-side chat API route. Never write a second validation implementation for the chat path.
+
+6. **Chat-driven edits/deletes must resolve a chart by id via `listCharts` first.** Never let the model guess an id from a title string without looking it up. If multiple charts could match what the user said, ask for clarification rather than picking one.
+
+7. **`deleteChart` is destructive with no undo — require a UI confirmation step before the tool actually executes**, even if the model has already decided which chart to delete.
+
+8. **Chat tools in this phase only read/write chart *definitions* in Supabase — they never query DuckDB or see actual data.** That's a deliberately separate, not-yet-built capability; don't add it as a side effect of building the chat CRUD tools.
+
 4. **One DuckDB WASM instance per page load.** The Parquet file is registered once (`CREATE TABLE sales AS SELECT * FROM read_parquet(...)`). Only per-chart `SELECT`s re-run on filter change — never re-run `CREATE TABLE`.
 
 5. **Supabase stores chart definitions only.** Never write query results or dataset rows into Postgres.

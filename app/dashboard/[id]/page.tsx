@@ -31,6 +31,7 @@ import { ChartCard } from "@/components/ChartCard";
 import { ModeBCard } from "@/components/ModeBCard";
 import { GlobalFilter } from "@/components/GlobalFilter";
 import { AddComponentModal } from "@/components/AddComponentModal";
+import { ChatPanel } from "@/components/ChatPanel";
 import type { Dashboard, DashboardComponent } from "@/types/dashboard";
 import { useDuckDb } from "@/lib/duckdb";
 
@@ -320,6 +321,17 @@ export default function DashboardPage() {
           }}
           onCreated={handleComponentCreated}
           onUpdated={handleComponentUpdated}
+        />
+      )}
+
+      {/* ── AI Chat Assistant Panel (Step 8) ── */}
+      {state.phase === "ok" && (
+        <ChatPanel
+          dashboardId={state.dashboard.id}
+          components={components}
+          onComponentCreated={handleComponentCreated}
+          onComponentUpdated={handleComponentUpdated}
+          onComponentDeleted={handleComponentDeleted}
         />
       )}
     </div>

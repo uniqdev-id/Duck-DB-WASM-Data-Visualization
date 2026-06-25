@@ -17,6 +17,7 @@
 
 import { useCallback, useId, useRef, useState, useEffect } from "react";
 import type { DashboardComponent, LineBarConfig, PieConfig } from "@/types/dashboard";
+import { validateChartDefinition } from "@/lib/validateChartDefinition";
 
 // ── AI Prompts ───────────────────────────────────────────────────────────────
 
@@ -50,17 +51,19 @@ export const PROMPT_MODE_A = `I'm building a chart for a dashboard. The chart wi
 - tx_discount (INTEGER)
 - tx_voucher (INTEGER)
 
-I need a chart that shows:  
+I need a chart that shows: 
 [ASK ME IN THE CHAT, And Give Suggestions].
 
 Output ONLY a JSON object with this exact shape, nothing else — no markdown
 fences, no explanation:
+
 {
   "title": "string, short human-readable name",
-  "chart_type": "line" | "bar" | "pie",
+  "chart_type": "line" | "bar" | "pie" | "scatter" | "waterfall" | "gauge" | "metric",
   "sql_template": "a DuckDB SQL SELECT statement",
   "config": { ... }
 }
+
 Rules for sql_template:
 - It must run against a table named 'sales'.
 - It MUST contain the literal substring {{filter}} exactly once, inside a WHERE
@@ -69,11 +72,41 @@ Rules for sql_template:
   and rely on it being replaced with 1=1.
 - Alias every output column to a clear name I can reference in config (e.g.
   AS month, AS total).
-Rules for config, depending on chart_type:
-- line or bar: { "xField": "<column alias for x-axis>", "yField": "<column alias for y-axis>", "seriesField": "<optional column alias for splitting into series>" }
-- pie: { "labelField": "<column alias for slice label>", "valueField": "<column alias for slice value>" }
-Use the exact column aliases from your own sql_template's SELECT list in config —
-don't invent new field names.`;
+- tx_grand_total, item_subtotal, unit_price, and similar fields are stored as
+  integers in minor currency units unless I say otherwise — don't assume they
+  need dividing, and don't silently divide by 100 unless I explicitly ask for it.
+- For chart_type "gauge" or "metric", the query must return EXACTLY ONE ROW.
+  If you need a comparison value (e.g. vs. a prior period), either compute it
+  in the same single-row query (e.g. via a subquery) or tell me explicitly that
+  it needs a second query — don't silently return multiple rows.
+- Sanity-check your own aggregation before responding: if a SUM/COUNT could be
+  inflated by a join fanout (e.g. joining sales to another table that has
+  multiple rows per sales_id), avoid the join or use a pre-aggregated subquery
+  instead. A single product's total should be a plausible real-world number,
+  not orders of magnitude larger than the rest.
+
+Rules for config, depending on chart_type — use the EXACT field names below,
+and make sure every field name matches an alias from your own sql_template's
+SELECT list (don't invent new field names that aren't in the query):
+
+- "line" or "bar": { "xField": string, "yField": string, "seriesField"?: string }
+- "pie": { "labelField": string, "valueField": string }
+- "scatter": { "xField": string, "yField": string, "seriesField"?: string }
+- "waterfall": { "labelField": string, "valueField": string, "totalLabels"?: string[] }
+  — totalLabels lists which labelField values (e.g. "Net Total") should render
+  as anchored/total bars instead of floating delta bars. Only include this if
+  the chart actually has a running-total/cumulative structure — don't force
+  waterfall onto data that isn't naturally sequential.
+- "gauge": { "valueField": string, "min": number, "max": number,
+  "thresholds"?: [{ "value": number, "color": string }] }
+  — valueField must be a single numeric value from the one-row result.
+- "metric": { "valueField": string, "label": string, "compareField"?: string,
+  "format"?: "number" | "currency" | "percent" }
+  — valueField and compareField (if present) must come from the one-row result.
+
+Double-check before responding: does chart_type match what the data shape can
+actually support (e.g. don't pick "gauge" for a multi-row time series), and does
+every field name in config actually exist in your sql_template's SELECT aliases?`;
 
 export const PROMPT_MODE_B = `I'm building a chart for a dashboard. The chart code will be a React component
 that receives ALREADY-QUERIED, ALREADY-FILTERED data as a prop — it must not
@@ -459,41 +492,22 @@ export function AddComponentModal({
       return;
     }
 
+    // Call the shared validation function
+    const validation = validateChartDefinition({
+      ...parsed,
+      mode: tab, // override mode with current tab context
+    });
+
+    if (!validation.isValid) {
+      setApiError(validation.error ?? "Validation failed.");
+      return;
+    }
+
+    const titleVal = parsed.title !== undefined ? String(parsed.title).trim() : (tab === "declarative" ? formA.title : formB.title);
+
     if (tab === "declarative") {
-      // Validate expected Mode A structure
-      const titleVal = parsed.title !== undefined ? String(parsed.title).trim() : formA.title;
-
-      if (!parsed.chart_type || typeof parsed.chart_type !== "string") {
-        setApiError("Missing or invalid 'chart_type' field (must be line, bar, pie, etc.).");
-        return;
-      }
-      const chartType = parsed.chart_type.toLowerCase();
-      const allowed = ["line", "bar", "pie", "scatter", "waterfall", "gauge", "metric"];
-      if (!allowed.includes(chartType)) {
-        setApiError(`Invalid chart_type '${chartType}'. Allowed: ${allowed.join(", ")}`);
-        return;
-      }
-
-      if (!parsed.sql_template || typeof parsed.sql_template !== "string") {
-        setApiError("Missing or invalid 'sql_template' field.");
-        return;
-      }
-      if (!parsed.sql_template.includes("{{filter}}")) {
-        setApiError("sql_template must contain {{filter}} exactly once (SPEC §5).");
-        return;
-      }
-      const filterCount = (parsed.sql_template.match(/\{\{filter\}\}/g) || []).length;
-      if (filterCount !== 1) {
-        setApiError("sql_template must contain {{filter}} exactly once (SPEC §5).");
-        return;
-      }
-
-      if (!parsed.config || typeof parsed.config !== "object") {
-        setApiError("Missing or invalid 'config' object.");
-        return;
-      }
-
-      const cfg = parsed.config;
+      const cfg = parsed.config || {};
+      const chartType = parsed.chart_type;
       const isPie = chartType === "pie";
       const isWaterfall = chartType === "waterfall";
       const isGauge = chartType === "gauge";
@@ -501,70 +515,19 @@ export function AddComponentModal({
       const isScatter = chartType === "scatter";
       const isLineOrBar = chartType === "line" || chartType === "bar";
 
-      let xF = "";
-      let yF = "";
-      let sF = "";
-      let lF = "";
-      let vF = "";
-      let wTL = "";
-      let gMin = "0";
-      let gMax = "100";
-      let gTh = "";
-      let mLabel = "";
-      let mComp = "";
-      let mFmt: "number" | "currency" | "percent" = "number";
+      const xF = (isLineOrBar || isScatter) ? cfg.xField || "" : "";
+      const yF = (isLineOrBar || isScatter) ? cfg.yField || "" : "";
+      const sF = (isLineOrBar || isScatter) ? cfg.seriesField || "" : "";
+      const lF = (isPie || isWaterfall) ? cfg.labelField || "" : "";
+      const vF = (isPie || isWaterfall || isGauge || isMetric) ? cfg.valueField || "" : "";
+      const wTL = isWaterfall && cfg.totalLabels ? (Array.isArray(cfg.totalLabels) ? cfg.totalLabels.join(", ") : String(cfg.totalLabels)) : "";
+      const gMin = isGauge ? String(cfg.min ?? 0) : "0";
+      const gMax = isGauge ? String(cfg.max ?? 100) : "100";
+      const gTh = isGauge && cfg.thresholds ? JSON.stringify(cfg.thresholds, null, 2) : "";
+      const mLabel = isMetric ? cfg.label || "" : "";
+      const mComp = isMetric ? cfg.compareField || "" : "";
+      const mFmt = isMetric ? cfg.format || "number" : "number";
 
-      if (isPie || isWaterfall) {
-        if (!cfg.labelField || typeof cfg.labelField !== "string") {
-          setApiError(`${chartType} config requires 'labelField' (string).`);
-          return;
-        }
-        if (!cfg.valueField || typeof cfg.valueField !== "string") {
-          setApiError(`${chartType} config requires 'valueField' (string).`);
-          return;
-        }
-        lF = cfg.labelField;
-        vF = cfg.valueField;
-        if (isWaterfall && cfg.totalLabels) {
-          wTL = Array.isArray(cfg.totalLabels) ? cfg.totalLabels.join(", ") : String(cfg.totalLabels);
-        }
-      } else if (isGauge || isMetric) {
-        if (!cfg.valueField || typeof cfg.valueField !== "string") {
-          setApiError(`${chartType} config requires 'valueField' (string).`);
-          return;
-        }
-        vF = cfg.valueField;
-        if (isGauge) {
-          gMin = String(cfg.min ?? 0);
-          gMax = String(cfg.max ?? 100);
-          if (cfg.thresholds) {
-            gTh = JSON.stringify(cfg.thresholds, null, 2);
-          }
-        } else {
-          if (!cfg.label || typeof cfg.label !== "string") {
-            setApiError("Metric config requires 'label' (string).");
-            return;
-          }
-          mLabel = cfg.label;
-          mComp = cfg.compareField || "";
-          mFmt = cfg.format || "number";
-        }
-      } else {
-        // line, bar, scatter
-        if (!cfg.xField || typeof cfg.xField !== "string") {
-          setApiError(`${chartType} config requires 'xField' (string).`);
-          return;
-        }
-        if (!cfg.yField || typeof cfg.yField !== "string") {
-          setApiError(`${chartType} config requires 'yField' (string).`);
-          return;
-        }
-        xF = cfg.xField;
-        yF = cfg.yField;
-        sF = cfg.seriesField || "";
-      }
-
-      // Success! Update manual form state and extra config properties
       setFormA({
         title: titleVal,
         chart_type: chartType as any,
@@ -583,40 +546,16 @@ export function AddComponentModal({
         metricFormat: mFmt,
       });
       setFormAConfigExtra(cfg);
-      setJsonSuccessMsg("JSON parsed successfully! Review the manual fields below.");
-      setInputMode("manual");
     } else {
-      // Validate expected Mode B structure
-      const titleVal = parsed.title !== undefined ? String(parsed.title).trim() : formB.title;
-
-      if (!parsed.sql_template || typeof parsed.sql_template !== "string") {
-        setApiError("Missing or invalid 'sql_template' field.");
-        return;
-      }
-      if (!parsed.sql_template.includes("{{filter}}")) {
-        setApiError("sql_template must contain {{filter}} exactly once (SPEC §5).");
-        return;
-      }
-      const filterCount = (parsed.sql_template.match(/\{\{filter\}\}/g) || []).length;
-      if (filterCount !== 1) {
-        setApiError("sql_template must contain {{filter}} exactly once (SPEC §5).");
-        return;
-      }
-
-      if (!parsed.code || typeof parsed.code !== "string" || !parsed.code.trim()) {
-        setApiError("Missing or invalid 'code' field.");
-        return;
-      }
-
-      // Success! Update manual form state
       setFormB({
         title: titleVal,
         sql_template: parsed.sql_template,
         code: parsed.code,
       });
-      setJsonSuccessMsg("JSON parsed successfully! Review the manual fields below.");
-      setInputMode("manual");
     }
+
+    setJsonSuccessMsg("JSON parsed successfully! Review the manual fields below.");
+    setInputMode("manual");
   }, [jsonText, tab, formA.title, formB.title]);
 
   // ── Submit ─────────────────────────────────────────────────────────────────
@@ -629,11 +568,6 @@ export function AddComponentModal({
       const isEdit = !!component;
 
       if (tab === "declarative") {
-        if (!hasFilterPlaceholder(formA.sql_template)) {
-          setApiError("sql_template must contain {{filter}} exactly once (SPEC §5).");
-          return;
-        }
-
         const config: Record<string, any> = { ...formAConfigExtra };
         if (formA.chart_type === "line" || formA.chart_type === "bar" || formA.chart_type === "scatter") {
           config.xField = formA.xField.trim();
@@ -726,6 +660,20 @@ export function AddComponentModal({
           delete config.thresholds;
         }
 
+        // Validate using the shared validator
+        const validation = validateChartDefinition({
+          title: formA.title,
+          mode: "declarative",
+          sql_template: formA.sql_template,
+          chart_type: formA.chart_type,
+          config,
+        });
+
+        if (!validation.isValid) {
+          setApiError(validation.error ?? "Validation failed.");
+          return;
+        }
+
         setSubmitting(true);
         try {
           const url = isEdit ? `/api/components/${component.id}` : "/api/components";
@@ -763,12 +711,15 @@ export function AddComponentModal({
         }
       } else {
         // Mode B
-        if (!hasFilterPlaceholder(formB.sql_template)) {
-          setApiError("sql_template must contain {{filter}} exactly once (SPEC §5).");
-          return;
-        }
-        if (!formB.code.trim()) {
-          setApiError("Component code cannot be empty.");
+        const validation = validateChartDefinition({
+          title: formB.title,
+          mode: "code",
+          sql_template: formB.sql_template,
+          code: formB.code,
+        });
+
+        if (!validation.isValid) {
+          setApiError(validation.error ?? "Validation failed.");
           return;
         }
 

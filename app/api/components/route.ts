@@ -18,6 +18,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { validateChartDefinition } from "@/lib/validateChartDefinition";
 import type { DashboardComponent } from "@/types/dashboard";
 
 export async function POST(req: NextRequest) {
@@ -34,17 +35,18 @@ export async function POST(req: NextRequest) {
   if (!dashboard_id || typeof dashboard_id !== "string") {
     return NextResponse.json({ error: "dashboard_id is required" }, { status: 400 });
   }
-  if (!title || typeof title !== "string") {
-    return NextResponse.json({ error: "title is required" }, { status: 400 });
-  }
-  if (mode !== "declarative" && mode !== "code") {
-    return NextResponse.json({ error: "mode must be 'declarative' or 'code'" }, { status: 400 });
-  }
-  if (typeof sql_template !== "string" || !sql_template.includes("{{filter}}")) {
-    return NextResponse.json(
-      { error: "sql_template must be a string containing {{filter}} (SPEC §5)" },
-      { status: 400 }
-    );
+
+  const validation = validateChartDefinition({
+    title,
+    mode,
+    sql_template,
+    chart_type,
+    config,
+    code,
+  });
+
+  if (!validation.isValid) {
+    return NextResponse.json({ error: validation.error }, { status: 400 });
   }
 
   // ── Insert ─────────────────────────────────────────────────────────────────

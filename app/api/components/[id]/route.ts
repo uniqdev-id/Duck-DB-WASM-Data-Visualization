@@ -8,6 +8,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { validateChartDefinition } from "@/lib/validateChartDefinition";
 
 export async function DELETE(
   _req: NextRequest,
@@ -50,27 +51,29 @@ export async function PATCH(
 
   const { title, mode, sql_template, chart_type, config, code } = body;
 
-  // ── Validation ─────────────────────────────────────────────────────────────
-  if (title !== undefined && (typeof title !== "string" || !title.trim())) {
-    return NextResponse.json({ error: "title must be a non-empty string" }, { status: 400 });
+  // Retrieve the existing component to merge and validate
+  const { data: existing, error: fetchErr } = await supabase
+    .from("dashboard_components")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (fetchErr || !existing) {
+    return NextResponse.json({ error: "Component not found" }, { status: 404 });
   }
-  if (mode !== undefined && mode !== "declarative" && mode !== "code") {
-    return NextResponse.json({ error: "mode must be 'declarative' or 'code'" }, { status: 400 });
-  }
-  if (sql_template !== undefined) {
-    if (typeof sql_template !== "string" || !sql_template.includes("{{filter}}")) {
-      return NextResponse.json(
-        { error: "sql_template must contain {{filter}} exactly once (SPEC §5)" },
-        { status: 400 }
-      );
-    }
-    const filterCount = (sql_template.match(/\{\{filter\}\}/g) || []).length;
-    if (filterCount !== 1) {
-      return NextResponse.json(
-        { error: "sql_template must contain {{filter}} exactly once (SPEC §5)" },
-        { status: 400 }
-      );
-    }
+
+  const merged = {
+    title: title !== undefined ? title : existing.title,
+    mode: mode !== undefined ? mode : existing.mode,
+    sql_template: sql_template !== undefined ? sql_template : existing.sql_template,
+    chart_type: chart_type !== undefined ? chart_type : existing.chart_type,
+    config: config !== undefined ? config : existing.config,
+    code: code !== undefined ? code : existing.code,
+  };
+
+  const validation = validateChartDefinition(merged);
+  if (!validation.isValid) {
+    return NextResponse.json({ error: validation.error }, { status: 400 });
   }
 
   // ── Update ─────────────────────────────────────────────────────────────────
@@ -78,12 +81,9 @@ export async function PATCH(
   if (title !== undefined) updateData.title = title.trim();
   if (mode !== undefined) updateData.mode = mode;
   if (sql_template !== undefined) updateData.sql_template = sql_template;
-  
-  // Handled conditionally to allow setting/unsetting based on mode
   if (chart_type !== undefined) updateData.chart_type = chart_type;
   if (config !== undefined) updateData.config = config;
   if (code !== undefined) updateData.code = code;
-  
   updateData.updated_at = new Date().toISOString();
 
   const { data, error } = await supabase
