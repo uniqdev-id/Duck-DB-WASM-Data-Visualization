@@ -16,7 +16,7 @@ export function IframeHeightMessenger() {
       );
     });
 
-    resizeObserver.observe(document.body);
+    resizeObserver.observe(document.documentElement);
 
     return () => {
       resizeObserver.disconnect();
