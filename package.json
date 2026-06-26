@@ -9,17 +9,17 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@ai-sdk/openai": "1.1.10",
     "@duckdb/duckdb-wasm": "^1.32.0",
     "@supabase/supabase-js": "^2.108.2",
     "ai": "4.1.28",
-    "@ai-sdk/openai": "1.1.10",
-    "zod": "4.4.3",
     "next": "16.2.9",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-gauge-component": "^2.0.29",
     "react-runner": "1.0.5",
-    "recharts": "^3.8.1"
+    "recharts": "^3.8.1",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
