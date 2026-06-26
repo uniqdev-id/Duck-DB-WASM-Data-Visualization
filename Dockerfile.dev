@@ -1,0 +1,15 @@
+FROM node:20-alpine
+WORKDIR /app
+
+# Install dependencies first to use cache when package files do not change
+COPY package*.json ./
+RUN npm install
+
+# Copy source files for the initial build context.
+# In development you can also mount the local project directory over /app.
+COPY . .
+
+ENV NODE_ENV=development
+EXPOSE 3000
+
+CMD ["npm", "run", "dev", "--", "--hostname", "0.0.0.0"]
