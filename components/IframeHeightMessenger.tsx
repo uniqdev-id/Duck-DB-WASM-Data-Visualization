@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 
-const PARENT_ORIGIN = "https://pos.uniq.web.id";
+const PARENT_ORIGIN = "*";
 
 export function IframeHeightMessenger() {
   useEffect(() => {
